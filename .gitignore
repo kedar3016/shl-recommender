@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+__pycache__/
+*.pyc
+
+# Environment secrets
+.env
+
+# Local logs or diagnostic outputs
+*.log
+debug_retriever.py
+list_grok_models.py
+test_grok.py
+test_download.py
+download_source_code.py
+list_hf_files.py
+download_and_extract.py
+
+# Prebuilt database binaries (built in Docker)
+catalog/faiss.index
+catalog/metadata.pkl
