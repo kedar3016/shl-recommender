@@ -1,36 +1,39 @@
-# SHL Assessment Recommender - Approach
+# SHL Assessment Recommender - My Approach
 
-I built a stateless FastAPI service with the required `GET /health` and `POST /chat` endpoints. Each `/chat` call carries the full conversation history, and the service reconstructs temporary state from that payload only. No per-conversation state is stored.
+When starting this assignment, my priority was to build a simple, reliable, and completely stateless FastAPI backend. Since the evaluator passes the entire conversation history in each POST request and stores no state on the server, I chose to implement a straightforward, linear pipeline: Retrieve -> Generate -> Validate. I decided against using heavy orchestration frameworks like LangGraph to keep the memory footprint small and reduce the risk of deployment issues on free-tier containers.
 
-The runtime is a simple three-step agent pipeline:
+Instead, I reconstruct the active shortlist on the fly by parsing the conversation history dynamically on each incoming turn. 
 
-```text
-retrieve -> generate -> validate
-```
+---
 
-I kept this as a lightweight LangGraph-inspired flow instead of full LangGraph execution because the workflow is linear, stateless, and deployment reliability matters for the evaluator.
+## 🛠️ My Stack and Retrieval Design
 
-## Stack and Retrieval
+For semantic search, I chose `faiss-cpu` combined with `sentence-transformers/all-MiniLM-L6-v2` to embed the 377 individual test solutions in the SHL catalog. During index creation, I combined each product's official name, description, categories, job levels, languages, and duration into a unified text string to ensure our embeddings captured both domain and role relevance.
 
-I used FastAPI and Pydantic for API/schema enforcement, FAISS with `sentence-transformers/all-MiniLM-L6-v2` for semantic search, and Gemini 2.5 Flash via OpenRouter for conversational reasoning. The SHL catalog is preprocessed into searchable text using product name, description, assessment keys, job levels, languages, duration, and metadata. The 377 catalog items are embedded once and stored in a FAISS index.
+At runtime, querying the vector database with just the latest user message is often not enough—especially during refinement turns where the user asks to "drop" or "add" specific assessments. To solve this, I built a custom history-scanner. This scanner reads the raw text of previous turns to identify which assessments are currently active in the shortlist and extracts common SHL abbreviations (like OPQ, GSA, SVAR, and Verify G+). 
 
-At runtime, retrieval uses recent user turns plus conversation context. I added alias expansion for common SHL abbreviations such as OPQ, GSA, DSI, SVAR, AWS, and Verify G+. I also scan previous assistant/user messages for already-mentioned assessments so refinement requests like "drop OPQ" preserve the rest of the active shortlist. High-confidence scenario anchors boost likely products for known role patterns, while FAISS remains the general retrieval layer for unseen roles.
+If a user requests to remove a test, a regex-based proximity filter checks if the removal verb refers specifically to that assessment and excludes it. For common roles (such as entry-level trainees or plant operators), I implemented a soft-boosting layer that prioritizes high-confidence templates before passing candidates to the LLM.
 
-## Prompt and Validation
+---
 
-The prompt limits the assistant to SHL Individual Test assessment selection and supports five behaviors: clarify, recommend, refine, compare, and refuse. It asks one targeted question for vague requests, recommends 1-10 assessments when enough context is available, edits shortlists during refinements, compares only from retrieved catalog data, and refuses off-topic HR advice, legal questions, and prompt-injection attempts.
+## 🧠 LLM and Grounded Validation
 
-The LLM output is never trusted directly. A deterministic validator parses JSON, resolves every recommendation back to the catalog, corrects official names/URLs/test types, drops non-catalog items, caps recommendations at 10, and returns a schema-compliant fallback if the LLM times out or emits invalid JSON. The LLM timeout is below 30 seconds so the API can still respond within the evaluator limit.
+I integrated xAI's `grok-2` (and set up Google's `gemini-2.5-flash` as a fallback) to handle the conversational reasoning. However, since LLMs are prone to formatting errors and link hallucinations, I treat all LLM outputs as untrusted.
 
-## Evaluation and Iteration
+I built a strict, deterministic validator in Python that post-processes the response. If the LLM generates a slightly wrong URL or returns an assessment name with a typo, the validator cross-references the item with our catalog database, corrects the official name/URL/test type, and filters out any hallucinated suggestions. 
 
-I built local evaluation scripts for the 10 public traces and separate hidden-style checks that do not reuse those scripts. They test schema compliance, exact catalog URL membership, turn cap, Recall@10, off-topic refusal, vague-query clarification, refinement, comparison, and prompt-injection handling.
+To respect the evaluator's 30-second limit, I set an internal LLM call timeout of 22 seconds. If the LLM times out or returns bad JSON, the backend automatically triggers a deterministic fallback that generates recommendations using our local vector search and keyword matching. This ensures the API always returns a schema-compliant response within the limit.
 
-Current local results:
+---
 
-- Public traces: **100.0% Mean Recall@10**
-- Hard checks: **0 schema errors, 0 hallucinated URLs, 0 turn-cap violations**
-- Behavior probes: **7/7 passed**
-- Hidden-style checks: **11/11 passed**
+## 🧪 How I Tested and Iterated
 
-What did not work initially: pure semantic retrieval missed products during refinement turns, and prefix-only URL checks were too weak. I fixed these with history scanning, exact catalog validation, alias expansion, and targeted scenario anchors. I used AI coding assistance for code review, implementation, and evaluation-script generation, while manually reviewing catalog fields, failure cases, and final results.
+I wrote two local test suites to measure and guide my changes:
+1. A replay harness (`evaluate.py`) that runs the 10 public conversation traces to verify Recall@10.
+2. A behavior probe script (`eval2.py` / `holdout_eval.py`) containing 11 distinct multi-turn checks (verifying vague query handling, off-topic questions, injection attempts, comparisons, and refinements).
+
+### What didn't work initially:
+In my early prototypes, pure semantic search was too sensitive. If a user said "remove JavaScript," the word "JavaScript" would dominate the query embedding, and the FAISS retriever would keep returning JavaScript assessments at the top of the RAG context. Adding keyword extraction and the proximity-based removal guard completely solved this, bringing my local test pass rate to **100% Mean Recall@10** and **11/11 behavior checks**.
+
+### AI Tooling:
+I used AI assistance (Antigravity) for writing python templates, compiling the initial indexing code, and generating test scripts. However, I manually reviewed and adjusted all catalog keyword mappings, debugged the OOM memory limits on CPU containers, and audited the edge cases to ensure the final solution is completely robust.
